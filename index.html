@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Cabezota</title>
+<style>
+:root{--bg:#0e0f12;--fg:#f3f1ec;--mut:#9a9aa3;--acc:#ffb000;--rec:#ff3b30;--panel:#1a1b20}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif;overflow:hidden}
+#stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000}
+canvas{max-width:100%;max-height:100%;display:block}
+canvas.mirror{transform:scaleX(-1)}
+#video{position:fixed;width:1px;height:1px;opacity:0;pointer-events:none}
+.bar{position:fixed;left:0;right:0;bottom:0;padding:12px max(16px,env(safe-area-inset-right,0px)) max(16px,env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));display:flex;align-items:center;justify-content:space-between;gap:12px;background:linear-gradient(transparent,rgba(0,0,0,.65))}
+button{font:inherit;color:var(--fg);background:var(--panel);border:1px solid #33343b;border-radius:10px;padding:10px 14px;min-height:44px}
+button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+#rec{width:72px;height:72px;border-radius:50%;border:4px solid #fff;background:var(--rec);padding:0}
+#rec.on{border-radius:18px;width:60px;height:60px}
+#panel{position:fixed;left:max(16px,env(safe-area-inset-left,0px));right:max(16px,env(safe-area-inset-right,0px));bottom:calc(104px + env(safe-area-inset-bottom,0px));background:rgba(26,27,32,.92);border-radius:14px;padding:12px 14px;display:none}
+#panel.open{display:block}
+label{display:flex;justify-content:space-between;color:var(--mut);font-size:13px;margin-top:6px}
+input[type=range]{width:100%;accent-color:var(--acc)}
+#start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:var(--bg);padding:24px;text-align:center}
+#start h1{margin:0;font-size:34px;letter-spacing:.02em}
+#start p{margin:0;color:var(--mut);max-width:34ch}
+#start button{background:var(--acc);color:#111;border:0;font-weight:700;padding:14px 26px;font-size:17px}
+#msg{position:fixed;top:max(12px,env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);background:rgba(0,0,0,.6);padding:6px 12px;border-radius:999px;font-size:13px;display:none}
+#timer{position:fixed;top:max(12px,env(safe-area-inset-top,0px));right:max(16px,env(safe-area-inset-right,0px));font-variant-numeric:tabular-nums;background:var(--rec);padding:4px 10px;border-radius:999px;font-size:13px;display:none}
+#result{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:16px}
+#result video{max-width:100%;max-height:68%;border-radius:10px;background:#000}
+#result .row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+#result a.btn{background:var(--acc);color:#111;text-decoration:none;font-weight:700;border-radius:10px;padding:12px 18px;min-height:44px;display:inline-flex;align-items:center}
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="out"></canvas></div>
+<video id="video" playsinline muted></video>
+<div id="msg"></div><div id="timer">00:00</div>
+<div id="panel">
+  <label>Tamaño de cabeza <span id="vM">1.9×</span></label>
+  <input id="sM" type="range" min="1" max="2.8" step="0.05" value="1.9">
+  <label>Estilo caricatura <span id="vT">80%</span></label>
+  <input id="sT" type="range" min="0" max="1" step="0.05" value="0.8">
+  <label>Altura de la cabeza <span id="vY">0</span></label>
+  <input id="sY" type="range" min="-0.5" max="0.5" step="0.02" value="0">
+</div>
+<div class="bar">
+  <button id="bAj">Ajustes</button>
+  <button id="rec" aria-label="Grabar"></button>
+  <button id="bFlip">Girar cámara</button>
+</div>
+<div id="start">
+  <h1>Cabezota</h1>
+  <p>Graba con tu cabeza agrandada y en estilo caricatura, en tiempo real. El video no sale de tu dispositivo.</p>
+  <button id="go">Abrir cámara</button>
+</div>
+<div id="result">
+  <video id="rv" controls playsinline></video>
+  <div class="row"><a id="dl" class="btn" download>Descargar video</a><button id="again">Seguir grabando</button></div>
+</div>
+
+<script src="face_mesh.js"></script>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const video=$('video'), canvas=$('out');
+const S={found:false,frames:0,detections:0,facing:'user',cx:0,cy:0,rad:0,present:0,tcx:0,tcy:0,trad:0,recBytes:0,err:''};
+window.__app=S;
+let stream=null,gl,prog,tex,U={},faceMesh=null,running=false,rec=null,chunks=[],recStart=0,tick=null;
+
+function msg(t,ms){const m=$('msg');m.textContent=t;m.style.display='block';clearTimeout(msg.t);if(ms)msg.t=setTimeout(()=>m.style.display='none',ms)}
+
+const VS='attribute vec2 a;varying vec2 uv;void main(){gl_Position=vec4(a,0.,1.);uv=vec2(a.x*.5+.5,.5-a.y*.5);}';
+const FS=`precision highp float;varying vec2 uv;uniform sampler2D t;uniform vec2 res;uniform vec2 c;uniform float rad;uniform float M;uniform float toon;
+vec2 warp(vec2 p){vec2 v=p-c;float d=length(v);float R0=rad*M;float R1=R0*1.7;
+ if(d>=R1||d<1e-3||M<=1.001)return p;
+ float w=smoothstep(R0*.95,R1,d);float s=mix(d/M,d,w);return c+v*(s/d);}
+vec3 samp(vec2 p){return texture2D(t,clamp(warp(p)/res,0.,1.)).rgb;}
+float lum(vec3 x){return dot(x,vec3(.299,.587,.114));}
+void main(){vec2 p=uv*res;vec3 col=samp(p);
+ if(toon>0.){float o=max(1.5,res.y/320.);
+  float gx=lum(samp(p+vec2(o,0.)))-lum(samp(p-vec2(o,0.)));
+  float gy=lum(samp(p+vec2(0.,o)))-lum(samp(p-vec2(0.,o)));
+  float e=smoothstep(.07,.22,length(vec2(gx,gy)));
+  vec3 q=floor(col*5.+.5)/5.;float g=lum(q);q=mix(vec3(g),q,1.35);
+  col=mix(col,q*(1.-.85*e),toon);}
+ gl_FragColor=vec4(col,1.);}`;
+
+function sh(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s}
+function initGL(){
+  gl=canvas.getContext('webgl',{preserveDrawingBuffer:true,antialias:false});
+  if(!gl)throw new Error('WebGL no disponible');
+  prog=gl.createProgram();gl.attachShader(prog,sh(gl.VERTEX_SHADER,VS));gl.attachShader(prog,sh(gl.FRAGMENT_SHADER,FS));gl.linkProgram(prog);
+  if(!gl.getProgramParameter(prog,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+  const a=gl.getAttribLocation(prog,'a');gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);
+  tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  ['t','res','c','rad','M','toon'].forEach(n=>U[n]=gl.getUniformLocation(prog,n));
+}
+
+function param(){return{M:+$('sM').value,T:+$('sT').value,Y:+$('sY').value}}
+
+function render(){
+  if(!running)return;
+  requestAnimationFrame(render);
+  if(location.search.includes('norender'))return;
+  if(video.readyState<2||!video.videoWidth)return;
+  const W=video.videoWidth,H=video.videoHeight;
+  if(canvas.width!==W||canvas.height!==H){canvas.width=W;canvas.height=H;gl.viewport(0,0,W,H)}
+  S.present+=((S.found?1:0)-S.present)*0.15;
+  const k=0.5;S.cx+=(S.tcx-S.cx)*k;S.cy+=(S.tcy-S.cy)*k;S.rad+=(S.trad-S.rad)*0.4;
+  const p=param();
+  const M=1+(p.M-1)*S.present;
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
+  gl.uniform1i(U.t,0);gl.uniform2f(U.res,W,H);
+  gl.uniform2f(U.c,S.cx,S.cy+p.Y*S.rad);gl.uniform1f(U.rad,Math.max(S.rad,1));gl.uniform1f(U.M,M);gl.uniform1f(U.toon,p.T);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  S.frames++;
+}
+
+function onResults(r){
+  const W=video.videoWidth,H=video.videoHeight;
+  const L=r.multiFaceLandmarks&&r.multiFaceLandmarks[0];
+  if(!L){S.found=false;return}
+  const top=L[10],chin=L[152],l=L[234],rr=L[454];
+  const fh=Math.hypot((top.x-chin.x)*W,(top.y-chin.y)*H);
+  const fw=Math.hypot((l.x-rr.x)*W,(l.y-rr.y)*H);
+  const cx=((top.x+chin.x)/2+(l.x+rr.x)/2)/2*W;
+  const cy=((top.y+chin.y)/2+(l.y+rr.y)/2)/2*H-fh*0.06;
+  const rad=Math.max(fh*0.78,fw*0.7);
+  if(!S.found&&S.present<0.05){S.cx=cx;S.cy=cy;S.rad=rad}
+  S.tcx=cx;S.tcy=cy;S.trad=rad;S.found=true;S.detections++;if(S.detections===1)console.log('FIRST_DETECTION',Math.round(performance.now()));
+}
+
+async function detectLoop(){
+  let last=0;
+  while(running){
+    // ceder siempre el control al navegador (si no, la pantalla se congela) y limitar a ~25 detecciones/s
+    await new Promise(r=>setTimeout(r,Math.max(0,40-(performance.now()-last))));
+    last=performance.now();
+    if(video.readyState>=2&&video.videoWidth){
+      try{await faceMesh.send({image:video})}catch(e){S.err=String(e);await new Promise(r=>setTimeout(r,200))}
+    }
+  }
+}
+
+async function openCam(){
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  const portrait=innerHeight>innerWidth;
+  const v={facingMode:S.facing,width:{ideal:portrait?720:1280},height:{ideal:portrait?1280:720},frameRate:{ideal:30}};
+  try{stream=await navigator.mediaDevices.getUserMedia({video:v,audio:{echoCancellation:true,noiseSuppression:true}})}
+  catch(e){stream=await navigator.mediaDevices.getUserMedia({video:v,audio:false});msg('Sin micrófono: se grabará sin audio',4000)}
+  video.srcObject=stream;await video.play();
+  canvas.classList.toggle('mirror',S.facing==='user');
+}
+
+async function start(){
+  try{
+    if(location.search.includes('demo')){initGL();await openCam();S.found=true;S.tcx=S.cx=video.videoWidth*0.5;S.tcy=S.cy=video.videoHeight*0.42;S.trad=S.rad=video.videoHeight*0.28;S.detections=99;$('start').style.display='none';running=true;render();return}
+    $('go').disabled=true;$('go').textContent='Cargando…';
+    initGL();
+    await openCam();
+    faceMesh=new FaceMesh({locateFile:f=>f});
+    faceMesh.setOptions({maxNumFaces:1,refineLandmarks:false,minDetectionConfidence:.5,minTrackingConfidence:.5});
+    faceMesh.onResults(onResults);
+    await faceMesh.initialize();
+    $('start').style.display='none';
+    running=true;render();detectLoop();
+  }catch(e){
+    S.err=String(e);$('go').disabled=false;$('go').textContent='Abrir cámara';
+    msg(e&&e.name==='NotAllowedError'?'Permiso de cámara denegado. Actívalo en el navegador.':'Error: '+(e.message||e),8000);
+  }
+}
+
+function pickMime(){
+  const c=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+  for(const m of c){if(window.MediaRecorder&&MediaRecorder.isTypeSupported(m))return m}
+  return '';
+}
+function fmt(s){return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')}
+
+function startRec(){
+  const cs=canvas.captureStream(30);
+  if(stream)stream.getAudioTracks().forEach(t=>cs.addTrack(t));
+  const mime=pickMime();
+  rec=new MediaRecorder(cs,mime?{mimeType:mime,videoBitsPerSecond:6e6}:{videoBitsPerSecond:6e6});
+  chunks=[];S.recBytes=0;
+  rec.ondataavailable=e=>{if(e.data&&e.data.size){chunks.push(e.data);S.recBytes+=e.data.size}};
+  rec.onstop=()=>{
+    const type=rec.mimeType||mime||'video/webm';
+    const blob=new Blob(chunks,{type});
+    const ext=type.includes('mp4')?'mp4':'webm';
+    const url=URL.createObjectURL(blob);
+    $('rv').src=url;$('dl').href=url;
+    const d=new Date(),z=n=>String(n).padStart(2,'0');
+    $('dl').download='cabezota_'+d.getFullYear()+z(d.getMonth()+1)+z(d.getDate())+'_'+z(d.getHours())+z(d.getMinutes())+'.'+ext;
+    $('result').style.display='flex';
+    S.lastBlobSize=blob.size;S.lastType=type;
+  };
+  rec.start(1000);recStart=Date.now();
+  $('rec').classList.add('on');$('timer').style.display='block';$('timer').textContent='00:00';
+  tick=setInterval(()=>$('timer').textContent=fmt(Math.floor((Date.now()-recStart)/1000)),500);
+}
+function stopRec(){
+  if(rec&&rec.state!=='inactive')rec.stop();
+  clearInterval(tick);$('rec').classList.remove('on');$('timer').style.display='none';
+}
+
+$('go').onclick=start;
+$('rec').onclick=()=>{(rec&&rec.state==='recording')?stopRec():startRec()};
+$('bAj').onclick=()=>$('panel').classList.toggle('open');
+$('bFlip').onclick=async()=>{
+  if(rec&&rec.state==='recording'){msg('Detén la grabación para girar la cámara',3000);return}
+  S.facing=S.facing==='user'?'environment':'user';S.found=false;
+  try{await openCam()}catch(e){msg('No se pudo girar la cámara',4000)}
+};
+$('again').onclick=()=>{$('result').style.display='none';$('rv').removeAttribute('src');$('rv').load()};
+$('sM').oninput=e=>$('vM').textContent=(+e.target.value).toFixed(1)+'×';
+$('sT').oninput=e=>$('vT').textContent=Math.round(e.target.value*100)+'%';
+$('sY').oninput=e=>$('vY').textContent=(+e.target.value).toFixed(2);
+})();
+</script>
+</body>
+</html>
